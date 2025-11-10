@@ -3,20 +3,28 @@ import os
 import requests
 import tabula
 import json
-from datetime import datetime , timedelta 
+import re
+import tempfile
+from datetime import datetime, timedelta
 from posoco.models import PosocoTableA, PosocoTableG
-import pandas as pd # Add this import at the top of your file
+import pandas as pd
+# new import for reading PDF content
+try:
+    from PyPDF2 import PdfReader
+except Exception:
+    PdfReader = None
 
 # --- Constants ---
 API_URL = "https://webapi.grid-india.in/api/v1/file"
 BASE_URL = "https://webcdn.grid-india.in/"
 SAVE_DIR = "downloads/POSOCO"
 
+# --- payload: initial (today) - but we will fall back if API returns nothing ---
 payload = {
     "_source": "GRDW",
     "_type": "DAILY_PSP_REPORT",
-    "_fileDate": "2025-26",  # Note: This might need adjustment for the current year.
-    "_month": "09"
+    "_fileDate": datetime.now().strftime("%Y-%m-%d"),
+    "_month": datetime.now().strftime("%m")
 }
 
 # --- Helper Functions ---
@@ -27,50 +35,293 @@ def make_report_dir(base_dir):
     os.makedirs(report_dir, exist_ok=True)
     return report_dir, timestamp
 
-def fetch_latest_pdf(api_url, base_url, payload, report_dir, timestamp):
-    """Fetches and downloads the latest PDF report."""
+def _parse_date_from_string(s):
+    """Try several date patterns and return a datetime or None."""
+    if not s:
+        return None
+    s = str(s)
+    patterns = [
+        (r'(\d{4}-\d{2}-\d{2})', '%Y-%m-%d'),
+        (r'(\d{2}-\d{2}-\d{4})', '%d-%m-%Y'),
+        (r'(\d{2}\d{2}\d{4})', '%d%m%Y'),
+        (r'(\d{8})', '%Y%m%d'),
+    ]
+    for pat, fmt in patterns:
+        m = re.search(pat, s)
+        if m:
+            try:
+                return datetime.strptime(m.group(1), fmt)
+            except Exception:
+                continue
     try:
-        # API call
-        response = requests.post(api_url, json=payload)
-        response.raise_for_status()
-        data = response.json()
+        return datetime.fromisoformat(s.split(".")[0])
+    except Exception:
+        return None
 
-        if "retData" not in data or not data["retData"]:
-            print("⚠️ No files found in response")
+def _post_and_get_retdata(api_url, payload, timeout=30):
+    """POST and return parsed JSON (or None on failure)."""
+    try:
+        resp = requests.post(api_url, json=payload, timeout=timeout)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Network/API error when posting payload {payload}: {e}")
+        return None
+    except ValueError as e:
+        print(f"❌ Invalid JSON response for payload {payload}: {e}")
+        return None
+
+def _download_to_temp(url, timeout=60):
+    """Download URL to a temporary file and return its path (or None)."""
+    try:
+        r = requests.get(url, stream=True, timeout=timeout)
+        r.raise_for_status()
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+        with open(tmp.name, "wb") as fh:
+            for chunk in r.iter_content(1024):
+                fh.write(chunk)
+        return tmp.name
+    except Exception as e:
+        print(f"❌ Error downloading temp PDF {url}: {e}")
+        return None
+
+def _extract_report_date_from_pdf(pdf_path):
+    """
+    Read first page text of pdf_path and try to find a date of the form:
+    DD.MM.YYYY or DD-MM-YYYY or YYYY-MM-DD or DD/MM/YYYY
+    Returns a datetime.date or None.
+    """
+    if PdfReader is None:
+        # PyPDF2 not available
+        return None
+    try:
+        reader = PdfReader(pdf_path)
+        if len(reader.pages) == 0:
+            return None
+        first_page = reader.pages[0]
+        text = ""
+        try:
+            text = first_page.extract_text() or ""
+        except Exception:
+            # fallback if extract_text fails
+            text = ""
+        if not text:
+            return None
+        # search common date patterns
+        patterns = [
+            r'(\b\d{2}[.\-/]\d{2}[.\-/]\d{4}\b)',  # DD.MM.YYYY or DD-MM-YYYY or DD/MM/YYYY
+            r'(\b\d{4}[.\-/]\d{2}[.\-/]\d{2}\b)',  # YYYY-MM-DD
+        ]
+        for pat in patterns:
+            m = re.search(pat, text)
+            if m:
+                ds = m.group(1)
+                for fmt in ("%d.%m.%Y", "%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%Y/%m/%d"):
+                    try:
+                        dt = datetime.strptime(ds, fmt)
+                        return dt.date()
+                    except Exception:
+                        continue
+        return None
+    except Exception as e:
+        print(f"❌ Error reading PDF for printed date: {e}")
+        return None
+
+def fetch_latest_pdf(api_url, base_url, payload, report_dir, timestamp):
+    """Fetches and downloads the latest PDF report, preferring a file that matches today's printed date."""
+    try:
+        print("🔎 Initial API payload:", payload)
+        response_data = _post_and_get_retdata(api_url, payload)
+
+        # fallback attempts (no-dates, last 7 days)
+        if not response_data or not response_data.get("retData"):
+            payload_no_dates = {k: v for k, v in payload.items() if k not in ("_fileDate", "_month")}
+            print("⚠️ No files for initial payload — trying without date filters:", payload_no_dates)
+            response_data = _post_and_get_retdata(api_url, payload_no_dates)
+
+        if not response_data or not response_data.get("retData"):
+            print("⚠️ Still no files. Trying last 7 days individually...")
+            for days_back in range(0, 7):
+                d = datetime.now() - timedelta(days=days_back)
+                daily_payload = {
+                    "_source": payload.get("_source"),
+                    "_type": payload.get("_type"),
+                    "_fileDate": d.strftime("%Y-%m-%d"),
+                    "_month": d.strftime("%m")
+                }
+                print(f"   → trying payload for {d.strftime('%Y-%m-%d')}")
+                resp = _post_and_get_retdata(api_url, daily_payload)
+                if resp and resp.get("retData"):
+                    response_data = resp
+                    print(f"✅ Found retData for date {d.strftime('%Y-%m-%d')}")
+                    break
+
+        if not response_data or not response_data.get("retData"):
+            print("⚠️ No files found after all fallback attempts.")
             return None
 
+        data = response_data
         pdf_files = [f for f in data["retData"] if f.get("MimeType") == "application/pdf"]
-
         if not pdf_files:
-            print("⚠️ No PDF files available")
+            print("⚠️ No PDF files available in retData")
             return None
 
-        latest_file = pdf_files[0]
-        file_path = latest_file.get("FilePath")
-        if not file_path:
-            print("⚠️ Missing FilePath for latest PDF")
+        # helpers for date inference
+        def infer_date_safe(item):
+            try:
+                for fld in ("FileDate", "CreatedOn", "LastModified", "fileDate", "createdOn", "lastModified"):
+                    val = item.get(fld)
+                    if val:
+                        vstr = str(val)
+                        for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                            try:
+                                return datetime.strptime(vstr.split(".")[0], fmt)
+                            except Exception:
+                                continue
+                        parsed = _parse_date_from_string(vstr)
+                        if parsed:
+                            return parsed
+                for fld in ("FilePath", "FileName", "Path", "fileName", "filepath", "Filepath"):
+                    parsed = _parse_date_from_string(str(item.get(fld, "")))
+                    if parsed:
+                        return parsed
+            except Exception:
+                pass
             return None
 
-        # --- CHANGE: Use today's date for the saved PDF filename ---
-        today = datetime.now()
-        pdf_name = f"posoco_{today.strftime('%d%m%Y')}.pdf"
-        # --- END CHANGE ---
-        
+        # common date string formats for "today" to search in filenames
+        local_today = datetime.now().date()
+        utc_today = datetime.utcnow().date()
+        patterns_for_today = [
+            local_today.strftime("%d%m%Y"),   # DDMMYYYY
+            local_today.strftime("%Y%m%d"),   # YYYYMMDD
+            local_today.strftime("%Y-%m-%d"), # YYYY-MM-DD
+            utc_today.strftime("%d%m%Y"),
+            utc_today.strftime("%Y%m%d"),
+            utc_today.strftime("%Y-%m-%d"),
+        ]
+
+        def filename_contains_today(item):
+            s = " ".join(str(item.get(k, "") or "") for k in ("FileName", "FilePath", "Path"))
+            normal = re.sub(r'[_\-/\s]+', '', s).lower()
+            for p in patterns_for_today:
+                if p.replace("-", "") in normal:
+                    return True
+            return False
+
+        # 1) pick by filename match for today (fast)
+        candidates = []
+        for item in pdf_files:
+            if filename_contains_today(item):
+                print("Found filename/path match for today:", item.get("FileName") or item.get("FilePath"))
+                candidates.append(item)
+
+        # 2) If none found by filename, attempt explicit date field match
+        if not candidates:
+            for item in pdf_files:
+                parsed = infer_date_safe(item)
+                if parsed:
+                    if parsed.date() == local_today or parsed.date() == utc_today:
+                        print("Found explicit metadata date match for today:", item.get("FileName") or item.get("FilePath"), parsed)
+                        candidates.append(item)
+
+        # 3) If still no candidates, fallback to most recent ordering (but we'll inspect them too)
+        if not candidates:
+            def file_date_key(item):
+                parsed = infer_date_safe(item)
+                if parsed:
+                    return parsed
+                return datetime(1970, 1, 1)
+            pdf_files_sorted = sorted(pdf_files, key=file_date_key, reverse=True)
+            for i, f in enumerate(pdf_files_sorted[:8]):
+                try:
+                    inf_date = file_date_key(f)
+                except Exception:
+                    inf_date = None
+                print(f"candidate [{i}]: FileName={f.get('FileName')} FilePath={f.get('FilePath')} inferred_date={inf_date}")
+            candidates = pdf_files_sorted[:8]  # inspect top candidates
+
+        # Inspect candidate PDFs by reading their printed date on the first page.
+        selected = None
+        temp_files_to_cleanup = []
+        for item in candidates:
+            file_path_rel = item.get("FilePath") or item.get("Path") or item.get("Filepath")
+            if not file_path_rel:
+                continue
+            download_url = base_url.rstrip("/") + "/" + file_path_rel.lstrip("/")
+            if "?" not in download_url:
+                download_url = download_url + f"?cachebust={int(datetime.now().timestamp())}"
+            # download to temp and inspect
+            tmp_pdf = _download_to_temp(download_url)
+            if not tmp_pdf:
+                continue
+            temp_files_to_cleanup.append(tmp_pdf)
+            printed_date = _extract_report_date_from_pdf(tmp_pdf)
+            print(f"Inspected temp file {tmp_pdf} -> printed_date = {printed_date}")
+            if printed_date and (printed_date == local_today or printed_date == utc_today):
+                # found exact match on printed date — choose this file
+                print("✅ Selected PDF by printed report date match:", download_url)
+                # move temp file to final location
+                server_parsed = printed_date
+                pdf_name = f"posoco_{server_parsed.strftime('%d%m%Y')}.pdf"
+                final_path = os.path.join(report_dir, pdf_name)
+                os.replace(tmp_pdf, final_path)
+                # cleanup other temp files
+                for t in temp_files_to_cleanup:
+                    if os.path.exists(t) and t != final_path:
+                        try:
+                            os.remove(t)
+                        except Exception:
+                            pass
+                return final_path
+
+        # If we reach here no candidate matched printed date exactly.
+        # Clean up temp files (we'll re-download the final chosen one normally)
+        for t in temp_files_to_cleanup:
+            if os.path.exists(t):
+                try:
+                    os.remove(t)
+                except Exception:
+                    pass
+
+        # Fallback: choose the most-recent item (same as before)
+        def file_date_key(item):
+            parsed = infer_date_safe(item)
+            if parsed:
+                return parsed
+            return datetime(1970, 1, 1)
+        pdf_files_sorted = sorted(pdf_files, key=file_date_key, reverse=True)
+        latest_item = pdf_files_sorted[0]
+        file_path_rel = latest_item.get("FilePath") or latest_item.get("Path") or latest_item.get("Filepath")
+        if not file_path_rel:
+            print("⚠️ Missing FilePath for chosen PDF")
+            return None
+
+        server_date = file_date_key(latest_item)
+        if server_date and server_date.year > 1970:
+            pdf_name = f"posoco_{server_date.strftime('%d%m%Y')}.pdf"
+        else:
+            pdf_name = f"posoco_{local_today.strftime('%d%m%Y')}.pdf"
+
         local_path = os.path.join(report_dir, pdf_name)
+        download_url = base_url.rstrip("/") + "/" + file_path_rel.lstrip("/")
+        if "?" not in download_url:
+            download_url = download_url + f"?cachebust={int(datetime.now().timestamp())}"
 
-        download_url = base_url.rstrip("/") + "/" + file_path.lstrip("/")
-        print(f"⬇️ Downloading latest PDF: {download_url}")
-        file_response = requests.get(download_url, stream=True)
+        print(f"⬇️ Downloading final selected PDF: {download_url}")
+        file_response = requests.get(download_url, stream=True, timeout=60)
         file_response.raise_for_status()
-
-        with open(local_path, "wb") as f:
+        with open(local_path, "wb") as fh:
             for chunk in file_response.iter_content(1024):
-                f.write(chunk)
+                fh.write(chunk)
         print(f"✅ Saved latest PDF: {local_path}")
         return local_path
 
     except requests.exceptions.RequestException as e:
         print(f"❌ An error occurred during download: {e}")
+        return None
+    except Exception as e:
+        print(f"❌ Unexpected error in fetch_latest_pdf: {e}")
         return None
 
 # --- THIS FUNCTION HAS BEEN UPDATED ---
@@ -185,10 +436,8 @@ def extract_tables_from_pdf(pdf_file, report_dir, timestamp):
         print("⚠️ No valid tables found in PDF. Using empty template.")
 
     # Save the final JSON to a file
-    # --- CHANGE: Use today's date in DDMMYYYY format for JSON filename ---
     date_compact = datetime.now().strftime('%d%m%Y')
     json_name = f"posoco_{date_compact}.json"
-    # --- END CHANGE ---
     output_json = os.path.join(report_dir, json_name)
 
     with open(output_json, "w", encoding="utf-8") as f:
@@ -197,7 +446,6 @@ def extract_tables_from_pdf(pdf_file, report_dir, timestamp):
     print(f"✅ JSON with shortened keys saved successfully at: {output_json}")
 
     return final_json
-
 
 def save_to_db(final_json):
     """Saves the processed JSON data to the Django database."""
@@ -249,7 +497,6 @@ def save_to_db(final_json):
         print("✅ Data saved to database successfully")
     except Exception as e:
         print(f"❌ An error occurred while saving to the database: {e}")
-
 
 # --- Django Management Command ---
 class Command(BaseCommand):

@@ -26,7 +26,13 @@ class Command(BaseCommand):
         "BALCO", "CHHATTISGARH", "DNHDDPDCL", "AMNSIL", "GOA", "GUJARAT",
         "MADHYA PRADESH", "MAHARASHTRA", "RIL JAMNAGAR", "WR"
     ]
-
+    def add_arguments(self, parser):
+        parser.add_argument(
+            '--date',
+            type=str,
+            help='Date for which to run the report, format: DD-MM-YYYY',
+            required=False
+        )
     def _safe_value(self, value, is_numeric=False):
         """
         Keeps dash '-' as-is, returns None for real empty values,
@@ -353,7 +359,7 @@ class Command(BaseCommand):
         else:
             self.stdout.write(self.style.WARNING("⚠️ No tables were successfully extracted to create a combined JSON file."))
 
-    def download_latest_pdf(self, new_base_url, base_download_dir="downloads"):
+    def download_latest_pdf(self, new_base_url, base_download_dir="downloads",given_date = None):
         project_name = "WRLDC"
         base_download_dir = os.path.join(base_download_dir, project_name)
         os.makedirs(base_download_dir, exist_ok=True)
@@ -363,13 +369,19 @@ class Command(BaseCommand):
         report_dir = None
 
         # compute today's date in the WRLDC timezone (IST) and use it for saved filenames
-        tz = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
-        today = datetime.datetime.now(datetime.timezone.utc).astimezone(tz)
+        
+        IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        if given_date:
+            today = datetime.datetime.strptime(given_date, "%Y-%m-%d").replace(tzinfo=IST) - datetime.timedelta(days=1)
+        else:
+            today = datetime.datetime.now(datetime.timezone.utc).astimezone(IST)- datetime.timedelta(days=1)
+            
         # We'll still try today then yesterday on the server to download
-        dates_to_try = [today, today - datetime.timedelta(days=1)]
+        # dates_to_try = [today, today - datetime.timedelta(days=1)]
 
         # Create report_dir using today's timestamp so folder name shows today's run time
-        now_str = today.strftime('%Y-%m-%d_%H-%M-%S')
+        tomorrow = today + datetime.timedelta(days=1)
+        now_str = tomorrow.strftime('%Y-%m-%d_%H-%M-%S')
         report_dir = os.path.join(base_download_dir, f"report_{now_str}")
         # create once here; we'll also ensure it exists in each loop iteration before writing
         os.makedirs(report_dir, exist_ok=True)
@@ -387,66 +399,65 @@ class Command(BaseCommand):
             return pdf_path, report_date, report_dir
 
         # Attempt downloads (try today then yesterday) but always save using today's filename
-        for current_date in dates_to_try:
-            year = current_date.year
-            month_name = current_date.strftime('%B')
-            day = current_date.day
+        # for current_date in dates_to_try:
+        current_date=today
+        year = current_date.year
+        month_name = current_date.strftime('%B')
+        day = current_date.day
 
-            directory_path_on_server = f"{year}/{month_name}/"
-            file_name_on_server = f"WRLDC_PSP_Report_{day:02d}-{current_date.month:02d}-{year}.pdf"
+        directory_path_on_server = f"{year}/{month_name}/"
+        file_name_on_server = f"WRLDC_PSP_Report_{day:02d}-{current_date.month:02d}-{year}.pdf"
 
-            full_url = f"{new_base_url}{directory_path_on_server}{file_name_on_server}"
-            self.stdout.write(f"🌐 Attempting to download from: {full_url}")
-            logging.info(f"Attempting to download from: {full_url}")
+        full_url = f"{new_base_url}{directory_path_on_server}{file_name_on_server}"
+        self.stdout.write(f"🌐 Attempting to download from: {full_url}")
+        logging.info(f"Attempting to download from: {full_url}")
 
-            try:
-                # ensure the directory exists right before writing (handles case where it was removed on prior 404)
-                os.makedirs(report_dir, exist_ok=True)
+        try:
+            # ensure the directory exists right before writing (handles case where it was removed on prior 404)
+            os.makedirs(report_dir, exist_ok=True)
 
-                response = requests.get(full_url, stream=True, timeout=30)
-                response.raise_for_status()
-                with open(local_file_path, 'wb') as pdf_file:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        pdf_file.write(chunk)
-                self.stdout.write(self.style.SUCCESS(f"✅ Successfully downloaded: {forced_local_pdf_filename} to {report_dir}"))
-                logging.info(f"Successfully downloaded: {local_file_path} to {report_dir}")
-                pdf_path = local_file_path
-                # Force report_date to today's date (so DB and JSON filenames reflect today)
-                report_date = today.date()
-                return pdf_path, report_date, report_dir
+            response = requests.get(full_url, stream=True, timeout=30)
+            response.raise_for_status()
+            with open(local_file_path, 'wb') as pdf_file:
+                for chunk in response.iter_content(chunk_size=8192):
+                    pdf_file.write(chunk)
+            self.stdout.write(self.style.SUCCESS(f"✅ Successfully downloaded: {forced_local_pdf_filename} to {report_dir}"))
+            logging.info(f"Successfully downloaded: {local_file_path} to {report_dir}")
+            pdf_path = local_file_path
+            # Force report_date to today's date (so DB and JSON filenames reflect today)
+            report_date = today.date()
+            return pdf_path, report_date, report_dir
 
-            except requests.exceptions.HTTPError as e:
-                # If 404, try next date (yesterday). Remove empty dir if created.
-                status = getattr(e.response, 'status_code', None)
-                if status == 404:
-                    self.stdout.write(self.style.WARNING(f"⚠️ File not found for {current_date.strftime('%d-%m-%Y')} at {full_url}. Trying next date if available."))
-                    logging.warning(f"File not found for {current_date.strftime('%d-%m-%Y')} at {full_url}. Trying next date if available.")
-                    if os.path.exists(report_dir) and not os.listdir(report_dir):
-                        try:
-                            os.rmdir(report_dir)
-                        except Exception:
-                            pass
-                    continue
-                else:
-                    self.stdout.write(self.style.ERROR(f"❌ HTTP Error {status} while downloading {file_name_on_server}: {e}"))
-                    logging.error(f"HTTP Error {status} while downloading {file_name_on_server}: {e}")
-                    if os.path.exists(report_dir) and not os.listdir(report_dir):
-                        try:
-                            os.rmdir(report_dir)
-                        except Exception:
-                            pass
-                    return None, None, None
-            except requests.exceptions.RequestException as e:
-                self.stdout.write(self.style.ERROR(f"❌ An unexpected error occurred during download: {e}"))
-                logging.error(f"An unexpected error occurred during download: {e}")
+        except requests.exceptions.HTTPError as e:
+            # If 404, try next date (yesterday). Remove empty dir if created.
+            status = getattr(e.response, 'status_code', None)
+            if status == 404:
+                self.stdout.write(self.style.WARNING(f"⚠️ File not found for {current_date.strftime('%d-%m-%Y')} at {full_url}. Trying next date if available."))
+                logging.warning(f"File not found for {current_date.strftime('%d-%m-%Y')} at {full_url}. Trying next date if available.")
+                if os.path.exists(report_dir) and not os.listdir(report_dir):
+                    try:
+                        os.rmdir(report_dir)
+                    except Exception:
+                        pass
+            else:
+                self.stdout.write(self.style.ERROR(f"❌ HTTP Error {status} while downloading {file_name_on_server}: {e}"))
+                logging.error(f"HTTP Error {status} while downloading {file_name_on_server}: {e}")
                 if os.path.exists(report_dir) and not os.listdir(report_dir):
                     try:
                         os.rmdir(report_dir)
                     except Exception:
                         pass
                 return None, None, None
+        except requests.exceptions.RequestException as e:
+            self.stdout.write(self.style.ERROR(f"❌ An unexpected error occurred during download: {e}"))
+            logging.error(f"An unexpected error occurred during download: {e}")
+            if os.path.exists(report_dir) and not os.listdir(report_dir):
+                try:
+                    os.rmdir(report_dir)
+                except Exception:
+                    pass
+            return None, None, None
 
-        # If loop completes without return, no file found
         self.stdout.write(self.style.ERROR("❌ Failed to download the latest report after trying all attempts."))
         logging.error("Failed to download the latest report after trying all attempts.")
         return None, None, None
@@ -458,7 +469,7 @@ class Command(BaseCommand):
         new_url = "https://reporting.wrldc.in:8081/PSP/"
 
         # The download function will try today then yesterday but will save the file named for today.
-        pdf_path, report_content_date, report_output_dir = self.download_latest_pdf(new_url)
+        pdf_path, report_content_date, report_output_dir = self.download_latest_pdf(new_url,given_date=options.get('date'))
 
         if pdf_path is None:
             self.stdout.write(self.style.WARNING("No PDF report was successfully downloaded or found locally. Exiting."))

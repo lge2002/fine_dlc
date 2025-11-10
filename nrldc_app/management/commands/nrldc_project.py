@@ -10,7 +10,7 @@ from tabula.io import read_pdf
 
 
 class Command(BaseCommand):
-    help = 'Download today\'s NRDC report and extract tables 2(A) and 2(C) to a single JSON file and save to DB'
+    help = 'Download NRLDC report for a specific date (or today if not provided), extract tables 2(A) and 2(C) to a single JSON file and save to DB'
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -35,6 +35,26 @@ class Command(BaseCommand):
             self.logger.warning(message)
         elif level == 'error':
             self.logger.error(message)
+
+    # Accept a --date argument from the dashboard / CLI
+    def add_arguments(self, parser):
+        parser.add_argument(
+            '--date',
+            dest='date',
+            help='Target report date to download in YYYY-MM-DD or DD-MM-YYYY format. If omitted, today is used.',
+            required=False
+        )
+
+    def parse_date_string(self, date_str):
+        """Parse incoming date string in common formats to a datetime.date."""
+        if not date_str:
+            return None
+        for fmt in ('%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y'):
+            try:
+                return datetime.datetime.strptime(date_str, fmt).date()
+            except ValueError:
+                continue
+        raise ValueError(f"Unsupported date format: {date_str}. Use YYYY-MM-DD or DD-MM-YYYY.")
 
     def extract_subtable_by_markers(self, df, start_marker, end_marker=None, header_row_count=0, debug_table_name="Unknown Table"):
         start_idx = None
@@ -276,8 +296,8 @@ class Command(BaseCommand):
                 'Min Demand Met': 'min_demand_met',
                 'Time.2': 'time_min_demand',
                 'ACE_MAX': 'ace_max',
-                'ACE_MIN': 'time_ace_max',
-                'Time.3': 'ace_min',
+                'ACE_MIN': 'ace_min',
+                'Time.3': 'time_ace_max',
                 'Time.4': 'time_ace_min'
             }
 
@@ -335,16 +355,27 @@ class Command(BaseCommand):
             self.write(self.style.WARNING("⚠️ No tables were successfully extracted to create a combined JSON file."), level='warning')
 
     def handle(self, *args, **options):
-        today = datetime.date.today()
-        today_str = today.strftime("%Y-%m-%d")
-        project_name = "NRLDC"
+        # If dashboard passes --date, parse and use it. Otherwise, use today.
+        raw_date = options.get('date')
+        try:
+            target_date = self.parse_date_string(raw_date) if raw_date else datetime.date.today()
+        except ValueError as e:
+            raise CommandError(str(e))
 
-        if Nrldc2AData.objects.filter(report_date=today).exists() or \
-           Nrldc2CData.objects.filter(report_date=today).exists():
-            self.write(self.style.SUCCESS(f"✅ Pass: Report data for {today_str} already exists in the database. Skipping download and extraction."))
+        # Logging what date we will process
+        self.write(self.style.SUCCESS(f"🔔 Requested report date: {target_date}"), level='info')
+
+        project_name = "NRLDC"
+        today_str_for_query = target_date.strftime("%Y-%m-%d")
+
+        # If data already exists for requested date, skip.
+        if Nrldc2AData.objects.filter(report_date=target_date).exists() or \
+           Nrldc2CData.objects.filter(report_date=target_date).exists():
+            self.write(self.style.SUCCESS(f"✅ Pass: Report data for {today_str_for_query} already exists in the database. Skipping download and extraction."))
             return
 
-        url = f"https://nrldc.in/get-documents-list/111?start_date={today_str}&end_date={today_str}"
+        # Build the metadata URL using the target date
+        url = f"https://nrldc.in/get-documents-list/111?start_date={today_str_for_query}&end_date={today_str_for_query}"
         headers = {
             "User-Agent": "Mozilla/5.0",
             "Accept": "application/json",
@@ -352,7 +383,7 @@ class Command(BaseCommand):
             "Referer": "https://nrldc.in/reports/daily-psp",
         }
 
-        self.write(f"🌐 Fetching NRDC report metadata for {today_str}...")
+        self.write(f"🌐 Fetching NRDC report metadata for {today_str_for_query}...")
         try:
             response = requests.get(url, headers=headers)
             response.raise_for_status()
@@ -365,32 +396,38 @@ class Command(BaseCommand):
             raise CommandError(f"❌ Failed to parse JSON response: {e}")
 
         if data.get("recordsFiltered", 0) == 0:
-            self.write(self.style.WARNING(f"⚠️ No report available for today ({today_str}). This might be due to weekends, holidays, or late publishing."), level='warning')
+            self.write(self.style.WARNING(f"⚠️ No report available for {today_str_for_query}. This might be due to weekends, holidays, or late publishing."), level='warning')
             return
 
         file_info = data["data"][0]
         file_name = file_info["file_name"]
-        title = file_info["title"]
+        title = file_info.get("title", file_name)
 
+        # Compose download_url
         download_url = f"https://nrldc.in/download-file?any=Reports%2FDaily%2FDaily%20PSP%20Report%2F{file_name}"
 
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        output_dir = os.path.join("downloads", project_name, f"report_{timestamp}")
+        # ------------------- CHANGE: Build output_dir using target_date -------------------
+        # Use the requested report date in the folder name, and keep a time suffix to avoid collisions.
+        date_part = target_date.strftime('%Y-%m-%d')
+        time_part = datetime.datetime.now().strftime('%H-%M-%S')
+        output_dir = os.path.join("downloads", project_name, f"report_{date_part}_{time_part}")
         os.makedirs(output_dir, exist_ok=True)
         self.write(f"📁 Created output directory: {output_dir}")
+        # -------------------------------------------------------------------------------
 
+        # Save to a temporary name, then rename to match requested target_date
         pdf_path = os.path.join(output_dir, f"{title}.pdf")
         self.write(f"⬇️ Attempting to download PDF to: {pdf_path}")
 
         try:
-            pdf_response = requests.get(download_url, headers=headers)
+            pdf_response = requests.get(download_url, headers=headers, timeout=60)
             pdf_response.raise_for_status()
             with open(pdf_path, "wb") as f:
                 f.write(pdf_response.content)
 
-            # Rename the downloaded PDF to match the report_date (keep same variable name pdf_path)
+            # Rename the downloaded PDF to match the target_date
             try:
-                new_pdf_name = f"nrldc_{today.strftime('%d%m%Y')}.pdf"
+                new_pdf_name = f"nrldc_{target_date.strftime('%d%m%Y')}.pdf"
                 new_pdf_path = os.path.join(output_dir, new_pdf_name)
                 os.rename(pdf_path, new_pdf_path)
                 pdf_path = new_pdf_path  # keep using same variable name afterwards
@@ -402,4 +439,5 @@ class Command(BaseCommand):
         except Exception as e:
             raise CommandError(f"❌ Failed to download PDF: {e}")
 
-        self.extract_tables_from_pdf(pdf_path, output_dir, today)
+        # Pass target_date (a datetime.date) to extract_tables_from_pdf so JSON/DB use same date
+        self.extract_tables_from_pdf(pdf_path, output_dir, target_date)

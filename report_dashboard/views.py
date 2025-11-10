@@ -55,7 +55,7 @@ def run_script_view(request, script_name):
             manage_py_path = 'manage.py'
             
             run_date = request.POST.get('run_date')
-            
+             
             command = [python_executable, manage_py_path, script_name]
             if run_date:
                 command.extend(['--date', run_date])
