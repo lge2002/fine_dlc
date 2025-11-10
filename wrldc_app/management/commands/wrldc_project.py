@@ -469,14 +469,13 @@ class Command(BaseCommand):
         new_url = "https://reporting.wrldc.in:8081/PSP/"
 
         # The download function will try today then yesterday but will save the file named for today.
-        pdf_path, report_content_date, report_output_dir = self.download_latest_pdf(new_url,given_date=options.get('date'))
+        pdf_path, report_content_date, report_output_dir = self.download_latest_pdf(new_url, given_date=options.get('date'))
 
         if pdf_path is None:
-            self.stdout.write(self.style.WARNING("No PDF report was successfully downloaded or found locally. Exiting."))
-            return
-            
-        # --- Keep behaviour requested: set report_date used for DB/JSON to today's date only ---
-        report_date = datetime.datetime.now().date() 
+            ...
+        # Use the actual date returned by downloader (date of the PDF we downloaded)
+        report_date = report_content_date
+
 
         # Pass the new date to extraction/saving routine
         self.extract_tables_from_pdf(pdf_path, report_output_dir, report_date)
