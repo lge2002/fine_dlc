@@ -28,10 +28,26 @@ payload = {
 }
 
 # --- Helper Functions ---
-def make_report_dir(base_dir):
-    """Create a timestamped subfolder inside POSOCO/."""
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    report_dir = os.path.join(base_dir, f"report_{timestamp}")
+def make_report_dir(base_dir, desired_date=None):
+    """Create a timestamped subfolder inside POSOCO/. 
+       If desired_date is provided, include that date in the folder name so past-date runs are kept distinct.
+    """
+    # desired_date may be a datetime.date or datetime or string parsed outside
+    if desired_date:
+        try:
+            if isinstance(desired_date, datetime):
+                date_part = desired_date.strftime("%Y-%m-%d")
+            else:
+                # assume date-like (datetime.date)
+                date_part = desired_date.strftime("%Y-%m-%d")
+        except Exception:
+            date_part = datetime.now().strftime("%Y-%m-%d")
+    else:
+        date_part = datetime.now().strftime("%Y-%m-%d")
+
+    timestamp = datetime.now().strftime("%H-%M-%S")
+    # folder includes the requested date and a time suffix to avoid collisions
+    report_dir = os.path.join(base_dir, f"report_{date_part}_{timestamp}")
     os.makedirs(report_dir, exist_ok=True)
     return report_dir, timestamp
 
@@ -127,8 +143,11 @@ def _extract_report_date_from_pdf(pdf_path):
         print(f"❌ Error reading PDF for printed date: {e}")
         return None
 
-def fetch_latest_pdf(api_url, base_url, payload, report_dir, timestamp):
-    """Fetches and downloads the latest PDF report, preferring a file that matches today's printed date."""
+def fetch_latest_pdf(api_url, base_url, payload, report_dir, timestamp, desired_date=None):
+    """Fetches and downloads the latest PDF report, preferring a file that matches today's printed date.
+       If desired_date (datetime.date) is provided, the final saved PDF will be named with that date.
+       NOTE: Selection/download logic is unchanged; only final filename uses desired_date if provided.
+    """
     try:
         print("🔎 Initial API payload:", payload)
         response_data = _post_and_get_retdata(api_url, payload)
@@ -258,15 +277,34 @@ def fetch_latest_pdf(api_url, base_url, payload, report_dir, timestamp):
             temp_files_to_cleanup.append(tmp_pdf)
             printed_date = _extract_report_date_from_pdf(tmp_pdf)
             print(f"Inspected temp file {tmp_pdf} -> printed_date = {printed_date}")
-            if printed_date and (printed_date == local_today or printed_date == utc_today):
-                # found exact match on printed date — choose this file
-                print("✅ Selected PDF by printed report date match:", download_url)
-                # move temp file to final location
-                server_parsed = printed_date
-                pdf_name = f"posoco_{server_parsed.strftime('%d%m%Y')}.pdf"
+            # When a desired_date is provided, we prefer it: if printed_date matches desired_date, accept.
+            if printed_date and desired_date and printed_date == desired_date:
+                print("✅ Selected PDF by printed report date match to desired_date:", download_url)
+                server_parsed = desired_date
+                # prefer requested desired_date for filename if provided, else keep server_parsed
+                if desired_date:
+                    pdf_name = f"posoco_{desired_date.strftime('%d%m%Y')}.pdf"
+                else:
+                    pdf_name = f"posoco_{server_parsed.strftime('%d%m%Y')}.pdf"
                 final_path = os.path.join(report_dir, pdf_name)
                 os.replace(tmp_pdf, final_path)
-                # cleanup other temp files
+                for t in temp_files_to_cleanup:
+                    if os.path.exists(t) and t != final_path:
+                        try:
+                            os.remove(t)
+                        except Exception:
+                            pass
+                return final_path
+            # If no desired_date given, keep original behaviour (accept printed_date == today)
+            if printed_date and (printed_date == local_today or printed_date == utc_today) and not desired_date:
+                print("✅ Selected PDF by printed report date match (today):", download_url)
+                server_parsed = printed_date
+                if desired_date:
+                    pdf_name = f"posoco_{desired_date.strftime('%d%m%Y')}.pdf"
+                else:
+                    pdf_name = f"posoco_{server_parsed.strftime('%d%m%Y')}.pdf"
+                final_path = os.path.join(report_dir, pdf_name)
+                os.replace(tmp_pdf, final_path)
                 for t in temp_files_to_cleanup:
                     if os.path.exists(t) and t != final_path:
                         try:
@@ -298,10 +336,14 @@ def fetch_latest_pdf(api_url, base_url, payload, report_dir, timestamp):
             return None
 
         server_date = file_date_key(latest_item)
-        if server_date and server_date.year > 1970:
-            pdf_name = f"posoco_{server_date.strftime('%d%m%Y')}.pdf"
+        # prefer requested desired_date for filename if provided
+        if desired_date:
+            pdf_name = f"posoco_{desired_date.strftime('%d%m%Y')}.pdf"
         else:
-            pdf_name = f"posoco_{local_today.strftime('%d%m%Y')}.pdf"
+            if server_date and getattr(server_date, "year", 0) > 1970:
+                pdf_name = f"posoco_{server_date.strftime('%d%m%Y')}.pdf"
+            else:
+                pdf_name = f"posoco_{local_today.strftime('%d%m%Y')}.pdf"
 
         local_path = os.path.join(report_dir, pdf_name)
         download_url = base_url.rstrip("/") + "/" + file_path_rel.lstrip("/")
@@ -324,8 +366,8 @@ def fetch_latest_pdf(api_url, base_url, payload, report_dir, timestamp):
         print(f"❌ Unexpected error in fetch_latest_pdf: {e}")
         return None
 
-# --- THIS FUNCTION HAS BEEN UPDATED ---
-def extract_tables_from_pdf(pdf_file, report_dir, timestamp):
+# --- THIS FUNCTION HAS BEEN UPDATED: accepts desired_date but DOES NOT CHANGE TABLE SELECTION LOGIC ---
+def extract_tables_from_pdf(pdf_file, report_dir, timestamp, desired_date=None):
     """
     Extracts tables, renames headings, and saves as JSON.
     This version uses flexible matching to handle unpredictable keys.
@@ -436,7 +478,16 @@ def extract_tables_from_pdf(pdf_file, report_dir, timestamp):
         print("⚠️ No valid tables found in PDF. Using empty template.")
 
     # Save the final JSON to a file
-    date_compact = datetime.now().strftime('%d%m%Y')
+    # Prefer the requested desired_date for JSON filename; fallback to now()
+    if desired_date:
+        if isinstance(desired_date, datetime):
+            date_compact = desired_date.strftime('%d%m%Y')
+        else:
+            # assume date-like (datetime.date)
+            date_compact = desired_date.strftime('%d%m%Y')
+    else:
+        date_compact = datetime.now().strftime('%d%m%Y')
+
     json_name = f"posoco_{date_compact}.json"
     output_json = os.path.join(report_dir, json_name)
 
@@ -502,13 +553,39 @@ def save_to_db(final_json):
 class Command(BaseCommand):
     help = "Downloads the latest NLDC PSP PDF, extracts key tables with shortened headings, and saves them to a file and the database."
 
+    def add_arguments(self, parser):
+        """
+        Accept --date in YYYY-MM-DD or DD-MM-YYYY (or many other formats parsed by _parse_date_from_string).
+        If omitted, the command will use today's date.
+        """
+        parser.add_argument(
+            '--date',
+            dest='date',
+            required=False,
+            help='Target report date to fetch (formats: YYYY-MM-DD, DD-MM-YYYY, DDMMYYYY, etc.). If omitted, uses today.'
+        )
+
     def handle(self, *args, **options):
         self.stdout.write("🚀 Starting POSOCO report download and processing...")
-        report_dir, timestamp = make_report_dir(SAVE_DIR)
-        pdf_path = fetch_latest_pdf(API_URL, BASE_URL, payload, report_dir, timestamp)
+        # Parse target date from --date if passed
+        raw_date = options.get('date')
+        if raw_date:
+            parsed_dt = _parse_date_from_string(raw_date)
+            if parsed_dt is None:
+                self.stdout.write(self.style.ERROR(f"❌ Could not parse date passed: {raw_date}"))
+                return
+            target_date = parsed_dt.date() if isinstance(parsed_dt, datetime) else parsed_dt
+        else:
+            target_date = datetime.now().date()
+
+        # Make report_dir including target_date so folder names reflect requested date
+        report_dir, timestamp = make_report_dir(SAVE_DIR, desired_date=target_date)
+        # pass desired_date to fetch_latest_pdf (only for filename purposes)
+        pdf_path = fetch_latest_pdf(API_URL, BASE_URL, payload, report_dir, timestamp, desired_date=target_date)
 
         if pdf_path:
-            final_json = extract_tables_from_pdf(pdf_path, report_dir, timestamp)
+            # pass desired_date to extract_tables_from_pdf so JSON filename uses target_date
+            final_json = extract_tables_from_pdf(pdf_path, report_dir, timestamp, desired_date=target_date)
             if final_json and (final_json["POSOCO"]["posoco_table_a"] or final_json["POSOCO"]["posoco_table_g"]):
                 save_to_db(final_json)
             else:
