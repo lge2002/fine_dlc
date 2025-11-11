@@ -351,8 +351,21 @@ class Command(BaseCommand):
 
         if combined_json_data:
             # Save JSON file with report_date in DDMMYYYY format (pattern requested: wrldc_DDMMYYYY.json)
-            date_compact = report_date.strftime('%d%m%Y')
-            combined_json_path = os.path.join(output_dir, f'wrldc_{date_compact}.json')
+            # BUT derive the JSON name from the folder date so it matches the PDF name (renaming only, no logic changes)
+            folder_basename = os.path.basename(output_dir).replace('report_', '')  # e.g., '2025-11-01_12-05-51'
+            folder_date_part = folder_basename.split('_')[0] if folder_basename else None
+            try:
+                if folder_date_part:
+                    json_date_str = datetime.datetime.strptime(folder_date_part, '%Y-%m-%d').strftime('%d%m%Y')
+                else:
+                    json_date_str = report_date.strftime('%d%m%Y')
+            except Exception:
+                try:
+                    json_date_str = report_date.strftime('%d%m%Y')
+                except Exception:
+                    json_date_str = datetime.datetime.now().strftime('%d%m%Y')
+
+            combined_json_path = os.path.join(output_dir, f'wrldc_{json_date_str}.json')
             with open(combined_json_path, 'w', encoding='utf-8') as f:
                 json.dump(combined_json_data, f, indent=4, ensure_ascii=False)
             self.stdout.write(self.style.SUCCESS(f"✅ Combined tables saved to: {combined_json_path}"))
@@ -379,28 +392,52 @@ class Command(BaseCommand):
         # We'll still try today then yesterday on the server to download
         # dates_to_try = [today, today - datetime.timedelta(days=1)]
 
-        # Create report_dir using today's timestamp so folder name shows today's run time
-        tomorrow = today + datetime.timedelta(days=1)
-        now_str = tomorrow.strftime('%Y-%m-%d_%H-%M-%S')
+        # Create report_dir using current_date when given_date specified, else use now (timestamp)
+        # This preserves original logic for selecting which date to download, but makes folder/file names consistent.
+        current_date = today
+        if given_date:
+            # Use the original given_date string for naming (so folder & filenames match what user passed)
+            # while keeping the original subtraction logic used for deciding which PDF to download.
+            try:
+                # ensure given_date is in YYYY-MM-DD format (user supplied)
+                folder_date_part = datetime.datetime.strptime(given_date, "%Y-%m-%d").strftime('%Y-%m-%d')
+            except Exception:
+                # fallback to current_date if given_date parsing fails (keeps original logic intact)
+                folder_date_part = current_date.strftime('%Y-%m-%d')
+            now_time_part = datetime.datetime.now().strftime('%H-%M-%S')
+            now_str = f"{folder_date_part}_{now_time_part}"
+        else:
+            # keep original behavior: folder name is current timestamp
+            now_str = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+
         report_dir = os.path.join(base_download_dir, f"report_{now_str}")
         # create once here; we'll also ensure it exists in each loop iteration before writing
         os.makedirs(report_dir, exist_ok=True)
         self.stdout.write(f"📁 Checking/Created report directory: {report_dir}")
 
-        # --- Use the consistent local filename based on today's date (pattern requested: wrldc_DDMMYYYY.pdf) ---
-        forced_local_pdf_filename = f"wrldc_{today.strftime('%d%m%Y')}.pdf"
+        # --- Use the consistent local filename based on the folder date (pattern requested: wrldc_DDMMYYYY.pdf) ---
+        # Convert folder date part (YYYY-MM-DD) to DDMMYYYY for filenames
+        folder_date_candidate = now_str.split('_')[0] if now_str else None
+        try:
+            if folder_date_candidate:
+                file_date_str = datetime.datetime.strptime(folder_date_candidate, '%Y-%m-%d').strftime('%d%m%Y')
+            else:
+                file_date_str = current_date.strftime('%d%m%Y')
+        except Exception:
+            file_date_str = current_date.strftime('%d%m%Y')
+
+        forced_local_pdf_filename = f"wrldc_{file_date_str}.pdf"
         local_file_path = os.path.join(report_dir, forced_local_pdf_filename)
 
         # If a file for today already exists locally, return it immediately (report_date will be today)
         if os.path.exists(local_file_path):
-            self.stdout.write(self.style.NOTICE(f"📄 PDF already exists locally for {today.strftime('%d-%m-%Y')} at {local_file_path}. Skipping download."))
+            self.stdout.write(self.style.NOTICE(f"📄 PDF already exists locally for {current_date.strftime('%d-%m-%Y')} at {local_file_path}. Skipping download."))
             pdf_path = local_file_path
-            report_date = today.date()
+            report_date = current_date.date()
             return pdf_path, report_date, report_dir
 
-        # Attempt downloads (try today then yesterday) but always save using today's filename
+        # Attempt downloads (try today then yesterday) but always save using folder-date-based filename
         # for current_date in dates_to_try:
-        current_date=today
         year = current_date.year
         month_name = current_date.strftime('%B')
         day = current_date.day
@@ -424,8 +461,8 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS(f"✅ Successfully downloaded: {forced_local_pdf_filename} to {report_dir}"))
             logging.info(f"Successfully downloaded: {local_file_path} to {report_dir}")
             pdf_path = local_file_path
-            # Force report_date to today's date (so DB and JSON filenames reflect today)
-            report_date = today.date()
+            # Force report_date to current_date (so DB and JSON filenames reflect this date)
+            report_date = current_date.date()
             return pdf_path, report_date, report_dir
 
         except requests.exceptions.HTTPError as e:
