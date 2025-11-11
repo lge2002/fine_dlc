@@ -18,6 +18,7 @@ class Command(BaseCommand):
             help='Date for which to run the report, format: DD-MM-YYYY',
             required=False
         )
+
     def write(self, message, level='info'):
         self.stdout.write(message)
         if level == 'info':
@@ -26,6 +27,7 @@ class Command(BaseCommand):
             self.logger.warning(message)
         elif level == 'error':
             self.logger.error(message)
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'logs')
@@ -38,8 +40,8 @@ class Command(BaseCommand):
             formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
             handler.setFormatter(formatter)
             self.logger.addHandler(handler)
-    help = 'Download today\'s SRLDC report and extract tables 2(A) and 2(C) to a single JSON file and save to DB'
 
+    help = 'Download today\'s SRLDC report and extract tables 2(A) and 2(C) to a single JSON file and save to DB'
 
     # List of expected state names for validation
     SOUTH_INDIAN_STATES = [
@@ -50,13 +52,11 @@ class Command(BaseCommand):
         "AP", "KAR", "KER", "PONDY", "TN", "TG", "REGION"
     ]
 
-
     def extract_subtable_by_markers(self, df, start_marker, end_marker=None, header_row_count=0, debug_table_name="Unknown Table"):
         """
         Extracts a sub-table from a DataFrame based on start and optional end markers.
         Handles multi-level headers by explicitly taking a specified number of rows after the start marker
         as header rows and combining them intelligently.
-
 
         Args:
             df (pd.DataFrame): The DataFrame to search within.
@@ -67,7 +67,6 @@ class Command(BaseCommand):
                                     that constitute the header. These rows will be combined to form column names.
             debug_table_name (str): A name for the table being processed, used in debug prints.
 
-
         Returns:
             tuple: (pd.DataFrame or None, list or None): The extracted sub-table and its column names,
             or (None, None) if the start marker is not found.
@@ -76,18 +75,15 @@ class Command(BaseCommand):
         end_idx = None
         new_columns = None
 
-
         for i, row in df.iterrows():
             row_str_series = row.astype(str).str.strip().str.replace(r'\s+', ' ', regex=True)
             if row_str_series.str.contains(start_marker, regex=True, na=False, case=False).any():
                 start_idx = i
                 break
 
-
         if start_idx is None:
             self.write(self.style.WARNING(f"⚠️ Start marker '{start_marker}' not found for {debug_table_name}."), level='warning')
             return None, None
-
 
         if end_marker:
             for i in range(start_idx + 1, len(df)):
@@ -96,15 +92,12 @@ class Command(BaseCommand):
                     end_idx = i
                     break
 
-
         if end_idx is not None:
             raw_sub_df = df.iloc[start_idx:end_idx].copy().reset_index(drop=True)
         else:
             raw_sub_df = df.iloc[start_idx:].copy().reset_index(drop=True)
 
-
         data_start_row_in_raw_sub_df = 1 + header_row_count
-
 
         if header_row_count > 0 and len(raw_sub_df) >= data_start_row_in_raw_sub_df:
             headers_df = raw_sub_df.iloc[1 : data_start_row_in_raw_sub_df]
@@ -160,7 +153,6 @@ class Command(BaseCommand):
                     else:
                         new_columns.append(b_col)
 
-
             if new_columns is not None:
                 sub_df_data = raw_sub_df.iloc[data_start_row_in_raw_sub_df:].copy()
                 sub_df_data = sub_df_data.reindex(columns=list(sub_df_data.columns) + [col for col in new_columns if col not in sub_df_data.columns])
@@ -175,7 +167,6 @@ class Command(BaseCommand):
                 return raw_sub_df.iloc[1:].dropna(axis=1, how='all'), None
         else:
             return raw_sub_df.iloc[1:].dropna(axis=1, how='all'), None
-
 
     def _safe_float(self, value):
         if pd.isna(value) or value is None:
@@ -192,7 +183,6 @@ class Command(BaseCommand):
         except (ValueError, TypeError):
             return None
 
-
     def _safe_string(self, value):
         if pd.isna(value) or value is None:
             return None
@@ -202,10 +192,8 @@ class Command(BaseCommand):
         s_val = s_val.replace('\r', ' ')
         return s_val
 
-
     def extract_tables_from_pdf(self, pdf_path, output_dir, report_date):
         self.logger.info("🔍 Extracting tables from PDF...")
-
 
         try:
             tables = read_pdf(
@@ -218,21 +206,16 @@ class Command(BaseCommand):
         except Exception as e:
             raise CommandError(f"❌ Tabula extraction failed: {e}")
 
-
         if not tables:
             raise CommandError("❌ No tables found in the PDF.")
-
 
         self.write(self.style.SUCCESS(f"✅ Found {len(tables)} tables."))
         self.logger.info(f"✅ Found {len(tables)} tables.")
 
-
         all_content_df = pd.concat(tables, ignore_index=True)
         all_content_df_cleaned = all_content_df.dropna(axis=0, how='all')
 
-
         combined_json_data = {}
-
 
         # --- Extract Table 2(A) ---
         sub_2A, headers_2A = self.extract_subtable_by_markers(
@@ -242,7 +225,7 @@ class Command(BaseCommand):
             header_row_count=2,
             debug_table_name="Table 2(A)"
         )
-        
+
         if sub_2A is not None:
             column_mapping_2A = {
                 'STATE': 'state',
@@ -275,7 +258,6 @@ class Command(BaseCommand):
                                          .isin(normalized_states)
                 ].copy()
 
-
                 if sub_2A_filtered.empty and not sub_2A_renamed.empty:
                     self.write(self.style.WARNING("⚠️ Exact state name matching failed for Table 2A. Attempting a more lenient match."), level='warning')
                     sub_2A_filtered = sub_2A_renamed[
@@ -290,13 +272,11 @@ class Command(BaseCommand):
                 self.write(self.style.WARNING("⚠️ 'state' column not found in Table 2(A) after rename. Skipping row filtering."), level='warning')
                 sub_2A_filtered = sub_2A_renamed.copy()
 
-
             model_fields_2A = list(column_mapping_2A.values())
             sub_2A_final = sub_2A_filtered[[col for col in model_fields_2A if col in sub_2A_filtered.columns]]
             sub_2A_final = sub_2A_final.dropna(subset=['state']).copy()
             combined_json_data['srldc_table_2A'] = sub_2A_final.to_dict(orient='records')
             self.write(self.style.SUCCESS(f"✅ Table 2(A) extracted for combined JSON."))
-
 
             for index, row_data in sub_2A_final.iterrows():
                 state_name = self._safe_string(row_data.get('state'))
@@ -335,7 +315,6 @@ class Command(BaseCommand):
         else:
             self.write(self.style.WARNING("⚠️ Table 2(A) not found or extraction failed."), level='warning')
 
-
         # --- Extract Table 2(C) ---
         sub_2C, headers_2C = self.extract_subtable_by_markers(
             all_content_df_cleaned,
@@ -352,7 +331,6 @@ class Command(BaseCommand):
             self.write("-----------------------------------------------------")
             self.logger.info("-----------------------------------------------------")
 
-
             # Debug lines still here (optional)
             self.write("Raw columns in Table 2(C): " + str(sub_2C.columns.tolist()))
             self.logger.info("Raw columns in Table 2(C): " + str(sub_2C.columns.tolist()))
@@ -365,7 +343,6 @@ class Command(BaseCommand):
                     self.logger.info(f"  Column: '{k}' => Value: '{v}'")
             else:
                 self.stdout.write("Table 2(C) extracted DataFrame is empty.")
-
 
             # UPDATED mapping here with corrected column mapping
             column_mapping_2C = {
@@ -398,7 +375,6 @@ class Command(BaseCommand):
                                          .isin(normalized_states_2C)
                 ].copy()
 
-
                 if sub_2C_filtered.empty and not sub_2C_renamed.empty:
                     self.stdout.write(self.style.WARNING("⚠️ Exact state name matching failed for Table 2C. Attempting a more lenient match."))
                     sub_2C_filtered = sub_2C_renamed[
@@ -413,15 +389,12 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.WARNING("⚠️ 'state' column not found in Table 2(C) after rename. Skipping row filtering."))
                 sub_2C_filtered = sub_2C_renamed.copy()
 
-
             model_fields_2C = list(column_mapping_2C.values())
             sub_2C_final = sub_2C_filtered[[col for col in model_fields_2C if col in sub_2C_filtered.columns]]
             sub_2C_final = sub_2C_final.dropna(subset=['state']).copy()
 
-
             combined_json_data['srldc_table_2C'] = sub_2C_final.to_dict(orient='records')
             self.stdout.write(self.style.SUCCESS(f"✅ Table 2(C) extracted for combined JSON."))
-
 
             for index, row_data in sub_2C_final.iterrows():
                 state_name = self._safe_string(row_data.get('state'))
@@ -430,14 +403,11 @@ class Command(BaseCommand):
                         ace_min_val = None
                         time_ace_min_val = None
 
-
                         if 'ace_min' in sub_2C_final.columns:
                             ace_min_val = self._safe_float(row_data.get('ace_min'))
 
-
                         if 'time_ace_min' in sub_2C_final.columns:
                             time_ace_min_val = self._safe_string(row_data.get('time_ace_min'))
-
 
                         obj, created = Srldc2CData.objects.update_or_create(
                             report_date=report_date,
@@ -480,27 +450,28 @@ class Command(BaseCommand):
                 self.stdout.write(f"{state_name:<12} | {ace_min_str:>10} | {time_str:>8}")
             # -------------------------------------------------------------------
 
-
             self.stdout.write(self.style.SUCCESS(f"✅ Table 2(C) data saved to database."))
             self.logger.info(f"✅ Table 2(C) data saved to database.")
         else:
             self.stdout.write(self.style.WARNING("⚠️ Table 2(C) not found or extraction failed."))
 
-
         if combined_json_data:
-            # Use the actual report_date (date object) to generate JSON filename in DDMMYYYY style
+            # Try to derive JSON filename from folder name (to match PDF naming derived from folder)
+            folder_basename = os.path.basename(output_dir).replace('report_', '')  # e.g., '2025-11-11_10-07-00'
+            folder_date_part = folder_basename.split('_')[0] if folder_basename else None    # '2025-11-11'
             try:
-                report_date_str_for_file = report_date.strftime('%d%m%Y')
+                if folder_date_part:
+                    json_date_str = datetime.datetime.strptime(folder_date_part, '%Y-%m-%d').strftime('%d%m%Y')
+                else:
+                    json_date_str = report_date.strftime('%d%m%Y')
             except Exception:
                 # fallback: if report_date isn't a date object convert to string and try to parse
                 try:
-                    report_date_dt = datetime.datetime.fromisoformat(str(report_date))
-                    report_date_str_for_file = report_date_dt.strftime('%d%m%Y')
+                    json_date_str = datetime.datetime.fromisoformat(str(report_date)).strftime('%d%m%Y')
                 except Exception:
-                    report_date_str_for_file = datetime.datetime.now().strftime('%d%m%Y')
+                    json_date_str = datetime.datetime.now().strftime('%d%m%Y')
 
-            report_date_str_for_file = report_date.strftime('%d%m%Y')
-            combined_json_path = os.path.join(output_dir, f'srldc_{report_date_str_for_file}.json')
+            combined_json_path = os.path.join(output_dir, f'srldc_{json_date_str}.json')
             with open(combined_json_path, 'w', encoding='utf-8') as f:
                 json.dump(combined_json_data, f, indent=4, ensure_ascii=False)
             self.stdout.write(self.style.SUCCESS(f"✅ Combined tables saved to: {combined_json_path}"))
@@ -509,59 +480,65 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING("⚠️ No tables were successfully extracted to create a combined JSON file."))
             self.logger.warning("⚠️ No tables were successfully extracted to create a combined JSON file.")
 
-
-    def download_latest_srldc_pdf(self, base_url="https://www.srldc.in/var/ftp/reports/psp/", base_download_dir="downloads",given_date=None):
+    def download_latest_srldc_pdf(self, base_url="https://www.srldc.in/var/ftp/reports/psp/", base_download_dir="downloads", given_date=None):
         project_name = "SRLDC"  # Add project name here
-        
+
         base_download_dir = os.path.join(base_download_dir, project_name)
         os.makedirs(base_download_dir, exist_ok=True)
-        
+
         pdf_path = None
         report_date = None
         report_dir = None
-        
+
         IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
         # Convert given_date if provided, else use current IST datetime
         if given_date:
             today = datetime.datetime.strptime(given_date, "%Y-%m-%d").replace(tzinfo=IST) - datetime.timedelta(days=1)
         else:
-            today = datetime.datetime.now(datetime.timezone.utc).astimezone(IST)- datetime.timedelta(days=1)
-            
+            today = datetime.datetime.now(datetime.timezone.utc).astimezone(IST) - datetime.timedelta(days=1)
+
         print("qwerty", today)
         dates_to_try = [today, today - datetime.timedelta(days=1)]
         print("Dates to try for downloading report:", dates_to_try)
 
-        current_date=today
+        current_date = today
         # for current_date in dates_to_try:
         year = current_date.year
         month_abbr = current_date.strftime('%b').capitalize()
         day = current_date.day
 
-
         directory_path_on_server = f"{year}/{month_abbr}{str(year)[-2:]}/"
         file_name_on_server = f"{day:02d}-{current_date.month:02d}-{year}-psp.pdf"
         print(f"Trying to download report for date: {file_name_on_server}")
-        
+
         full_url = f"{base_url}{directory_path_on_server}{file_name_on_server}"
-        
+
         # Always include time for folder naming, even if date is provided
         if given_date:
-            # Combine the given date with the current time
             now_str = f"{given_date}_{datetime.datetime.now().strftime('%H-%M-%S')}"
         else:
-            # Default to full current timestamp
             now_str = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 
+        # Folder name uses now_str (timestamped)
         report_dir = os.path.join(base_download_dir, f"report_{now_str}")
-
         os.makedirs(report_dir, exist_ok=True)
         self.stdout.write(f"📁 Checking/Created report directory: {report_dir}")
 
+        # --- Rename behavior based on folder timestamp while keeping original logic ---
+        # Use the folder date (YYYY-MM-DD from now_str) to create file date in DDMMYYYY format
+        folder_date_part = now_str.split('_')[0] if now_str else None  # '2025-11-11'
+        try:
+            if folder_date_part:
+                file_date_str = datetime.datetime.strptime(folder_date_part, '%Y-%m-%d').strftime('%d%m%Y')
+            else:
+                # fallback to current_date (original logic)
+                file_date_str = current_date.strftime('%d%m%Y')
+        except Exception:
+            file_date_str = current_date.strftime('%d%m%Y')
 
-        local_pdf_filename = f"srldc_{current_date.strftime('%d%m%Y')}.pdf"
+        local_pdf_filename = f"srldc_{file_date_str}.pdf"
         local_file_path = os.path.join(report_dir, local_pdf_filename)
-
 
         if os.path.exists(local_file_path):
             self.stdout.write(self.style.NOTICE(f"📄 PDF already exists locally for {current_date.strftime('%d-%m-%Y')} at {local_file_path}. Skipping download."))
@@ -570,10 +547,8 @@ class Command(BaseCommand):
             report_date = current_date.date()
             return pdf_path, report_date, report_dir
 
-
         self.stdout.write(f"🌐 Attempting to download from: {full_url}")
         self.logger.info(f"🌐 Attempting to download from: {full_url}")
-
 
         try:
             response = requests.get(full_url, stream=True)
@@ -586,7 +561,7 @@ class Command(BaseCommand):
             pdf_path = local_file_path
             report_date = current_date.date()
             return pdf_path, report_date, report_dir
-            
+
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 404:
                 self.stdout.write(self.style.WARNING(f"⚠️ File not found for {current_date.strftime('%d-%m-%Y')} at {full_url}. Trying next date if available."))
@@ -599,11 +574,10 @@ class Command(BaseCommand):
         except requests.exceptions.RequestException as e:
             self.stdout.write(self.style.ERROR(f"❌ An unexpected error occurred during download: {e}"))
             self.logger.error(f"❌ An unexpected error occurred during download: {e}")
-        
+
         self.stdout.write(self.style.ERROR("❌ Failed to download the latest PSP report after trying all attempts."))
         self.logger.error("❌ Failed to download the latest PSP report after trying all attempts.")
         return None, None, None
-
 
     def handle(self, *args, **options):
         if "JAVA_HOME" not in os.environ:
