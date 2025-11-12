@@ -2,21 +2,20 @@
 
 import os
 import json
-import re 
+import re
 import requests
 from glob import glob
 from datetime import datetime, timedelta
 
 from django.core.management.base import BaseCommand, CommandError
 
-# Your original functions and data structures remain unchanged
 def extract_date_from_filename(filename):
     # ... (this function is unchanged) ...
     patterns = [
-        (r'(\d{4})-(\d{2})-(\d{2})', (1, 2, 3)), 
-        (r'(\d{2})-(\d{2})-(\d{4})', (3, 2, 1)), 
-        (r'daily(\d{2})(\d{2})(\d{2})', (3, 2, 1)), 
-        (r'(\d{2})(\d{2})(\d{4})', (3, 2, 1)),    
+        (r'(\d{4})-(\d{2})-(\d{2})', (1, 2, 3)),
+        (r'(\d{2})-(\d{2})-(\d{4})', (3, 2, 1)),
+        (r'daily(\d{2})(\d{2})(\d{2})', (3, 2, 1)),
+        (r'(\d{2})(\d{2})(\d{4})', (3, 2, 1)),
     ]
     for pattern, (y_idx, m_idx, d_idx) in patterns:
         match = re.search(pattern, filename)
@@ -204,10 +203,23 @@ class Command(BaseCommand):
         except requests.exceptions.RequestException as e:
             raise CommandError(f"🚨 An error occurred while trying to connect to the API: {e}")
 
+        # -----------------------
+        # Save merged JSON locally (+1 day logic for saving)
+        # -----------------------
         output_dir = os.path.join('downloads', 'overall_json')
         os.makedirs(output_dir, exist_ok=True)
-        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-        output_path = os.path.join(output_dir, f'merged_reports_{timestamp}.json')
+
+        # Add +1 day for file naming purpose only
+        save_date = (datetime.strptime(report_date, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+
+        # === CHANGE: filename logic (use +1 day for saving) ===
+        if date_str_option:
+            filename = f'merged_reports_{save_date}.json'
+        else:
+            timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            filename = f'merged_reports_{timestamp}.json'
+
+        output_path = os.path.join(output_dir, filename)
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(merged_data, f, indent=2, ensure_ascii=False)
         self.stdout.write(self.style.SUCCESS(f"\nMerged latest reports for {report_date} saved to {output_path}"))
