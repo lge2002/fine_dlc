@@ -51,6 +51,7 @@ def make_report_dir(base_dir, desired_date=None):
     os.makedirs(report_dir, exist_ok=True)
     return report_dir, timestamp
 
+
 def _parse_date_from_string(s):
     """Try several date patterns and return a datetime or None."""
     if not s:
@@ -74,6 +75,7 @@ def _parse_date_from_string(s):
     except Exception:
         return None
 
+
 def _post_and_get_retdata(api_url, payload, timeout=30):
     """POST and return parsed JSON (or None on failure)."""
     try:
@@ -86,6 +88,7 @@ def _post_and_get_retdata(api_url, payload, timeout=30):
     except ValueError as e:
         print(f"❌ Invalid JSON response for payload {payload}: {e}")
         return None
+
 
 def _download_to_temp(url, timeout=60):
     """Download URL to a temporary file and return its path (or None)."""
@@ -100,6 +103,7 @@ def _download_to_temp(url, timeout=60):
     except Exception as e:
         print(f"❌ Error downloading temp PDF {url}: {e}")
         return None
+
 
 def _extract_report_date_from_pdf(pdf_path):
     """
@@ -143,228 +147,165 @@ def _extract_report_date_from_pdf(pdf_path):
         print(f"❌ Error reading PDF for printed date: {e}")
         return None
 
-def fetch_latest_pdf(api_url, base_url, payload, report_dir, timestamp, desired_date=None):
-    """Fetches and downloads the latest PDF report, preferring a file that matches today's printed date.
-       If desired_date (datetime.date) is provided, the final saved PDF will be named with that date.
-       NOTE: Selection/download logic is unchanged; only final filename uses desired_date if provided.
+
+# ---------- New: fetch_report_for_target_date_with_fill ----------
+def fetch_report_for_target_date_with_fill(api_url, base_url, payload, report_dir, target_date, lookback_days=7):
+    """
+    Policy:
+      - If a PDF for report_date == target_date exists and is valid, download and save as posoco_<target_date>.pdf
+      - Else choose the PDF with posting_date <= target_date with the latest posting_date (i.e. most recent available by that day). 
+        Download that PDF (even if its report_date < target_date) and SAVE the file named as posoco_<target_date>.pdf.
+      - Else look back by report_date up to lookback_days and pick the latest previous report; save it named as posoco_<target_date>.pdf.
+    Returns: (local_pdf_path_or_None, metadata_or_None)
+    metadata = { 'selected_report_date': date, 'selected_posting_date': date, 'title': str, 'filepath': str, 'mime': str }
     """
     try:
-        print("🔎 Initial API payload:", payload)
-        response_data = _post_and_get_retdata(api_url, payload)
+        resp = _post_and_get_retdata(api_url, {"_source": payload.get("_source", "GRDW"), "_type": payload.get("_type", "DAILY_PSP_REPORT")})
+        if not resp or not resp.get("retData"):
+            print("❌ No retData from API.")
+            return None, None
 
-        # fallback attempts (no-dates, last 7 days)
-        if not response_data or not response_data.get("retData"):
-            payload_no_dates = {k: v for k, v in payload.items() if k not in ("_fileDate", "_month")}
-            print("⚠️ No files for initial payload — trying without date filters:", payload_no_dates)
-            response_data = _post_and_get_retdata(api_url, payload_no_dates)
+        items = resp["retData"]
 
-        if not response_data or not response_data.get("retData"):
-            print("⚠️ Still no files. Trying last 7 days individually...")
-            for days_back in range(0, 7):
-                d = datetime.now() - timedelta(days=days_back)
-                daily_payload = {
-                    "_source": payload.get("_source"),
-                    "_type": payload.get("_type"),
-                    "_fileDate": d.strftime("%Y-%m-%d"),
-                    "_month": d.strftime("%m")
-                }
-                print(f"   → trying payload for {d.strftime('%Y-%m-%d')}")
-                resp = _post_and_get_retdata(api_url, daily_payload)
-                if resp and resp.get("retData"):
-                    response_data = resp
-                    print(f"✅ Found retData for date {d.strftime('%Y-%m-%d')}")
-                    break
-
-        if not response_data or not response_data.get("retData"):
-            print("⚠️ No files found after all fallback attempts.")
-            return None
-
-        data = response_data
-        pdf_files = [f for f in data["retData"] if f.get("MimeType") == "application/pdf"]
-        if not pdf_files:
-            print("⚠️ No PDF files available in retData")
-            return None
-
-        # helpers for date inference
-        def infer_date_safe(item):
+        def parse_title_to_date(title):
+            if not title:
+                return None
+            m = re.match(r'^\s*(\d{2})[.\-/](\d{2})[.\-/](\d{2,4})', str(title).strip())
+            if not m:
+                return None
+            d, mo, yy = m.group(1), m.group(2), m.group(3)
+            yyyy = 2000 + int(yy) if len(yy) == 2 else int(yy)
             try:
-                for fld in ("FileDate", "CreatedOn", "LastModified", "fileDate", "createdOn", "lastModified"):
-                    val = item.get(fld)
-                    if val:
-                        vstr = str(val)
-                        for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-                            try:
-                                return datetime.strptime(vstr.split(".")[0], fmt)
-                            except Exception:
-                                continue
-                        parsed = _parse_date_from_string(vstr)
-                        if parsed:
-                            return parsed
-                for fld in ("FilePath", "FileName", "Path", "fileName", "filepath", "Filepath"):
-                    parsed = _parse_date_from_string(str(item.get(fld, "")))
-                    if parsed:
-                        return parsed
+                return datetime(yyyy, int(mo), int(d)).date()
             except Exception:
-                pass
+                return None
+
+        def parse_posting_date(it):
+            for fld in ("CreatedOn", "ModifiedOn", "Field1", "Field2"):
+                val = it.get(fld)
+                if val:
+                    p = _parse_date_from_string(val)
+                    if p:
+                        return p.date() if isinstance(p, datetime) else p.date()
             return None
 
-        # common date string formats for "today" to search in filenames
-        local_today = datetime.now().date()
-        utc_today = datetime.utcnow().date()
-        patterns_for_today = [
-            local_today.strftime("%d%m%Y"),   # DDMMYYYY
-            local_today.strftime("%Y%m%d"),   # YYYYMMDD
-            local_today.strftime("%Y-%m-%d"), # YYYY-MM-DD
-            utc_today.strftime("%d%m%Y"),
-            utc_today.strftime("%Y%m%d"),
-            utc_today.strftime("%Y-%m-%d"),
-        ]
+        # Build enriched records
+        records = []
+        for it in items:
+            mime = (it.get("MimeType") or "").lower()
+            title = (it.get("Title_") or it.get("FileName") or "") or ""
+            report_dt = parse_title_to_date(title)
+            posting_dt = parse_posting_date(it)
+            file_path = it.get("FilePath") or it.get("Path") or it.get("Filepath")
+            records.append({
+                "item": it,
+                "title": title,
+                "mime": mime,
+                "report_date": report_dt,
+                "posting_date": posting_dt,
+                "filepath": file_path
+            })
 
-        def filename_contains_today(item):
-            s = " ".join(str(item.get(k, "") or "") for k in ("FileName", "FilePath", "Path"))
-            normal = re.sub(r'[_\-/\s]+', '', s).lower()
-            for p in patterns_for_today:
-                if p.replace("-", "") in normal:
-                    return True
-            return False
+        # Focus on real PDFs (prefer actual pdf records)
+        pdf_records = [r for r in records if r["filepath"] and r["mime"] == "application/pdf"]
+        # If no pdf_records, try to find pdf alternatives (same title)
+        if not pdf_records:
+            pdf_alts = []
+            for r in records:
+                if r["title"]:
+                    alt = next((x for x in records if x["title"] == r["title"] and x["mime"] == "application/pdf" and x["filepath"]), None)
+                    if alt:
+                        pdf_alts.append(alt)
+            pdf_records = pdf_alts
 
-        # 1) pick by filename match for today (fast)
-        candidates = []
-        for item in pdf_files:
-            if filename_contains_today(item):
-                print("Found filename/path match for today:", item.get("FileName") or item.get("FilePath"))
-                candidates.append(item)
+        if not pdf_records:
+            print("⚠️ No PDF records available in retData.")
+            return None, None
 
-        # 2) If none found by filename, attempt explicit date field match
-        if not candidates:
-            for item in pdf_files:
-                parsed = infer_date_safe(item)
-                if parsed:
-                    if parsed.date() == local_today or parsed.date() == utc_today:
-                        print("Found explicit metadata date match for today:", item.get("FileName") or item.get("FilePath"), parsed)
-                        candidates.append(item)
+        # 1) Try exact report_date == target_date among PDFs
+        exacts = [r for r in pdf_records if r["report_date"] == target_date]
+        if exacts:
+            for r in sorted(exacts, key=lambda x: (x["posting_date"] or datetime(1970,1,1).date()), reverse=True):
+                fp = r["filepath"]
+                download_url = base_url.rstrip("/") + "/" + fp.lstrip("/")
+                if "?" not in download_url:
+                    download_url = download_url + f"?cachebust={int(datetime.now().timestamp())}"
+                tmp = _download_to_temp(download_url)
+                if not tmp:
+                    continue
+                printed = _extract_report_date_from_pdf(tmp)
+                if printed:
+                    if printed == r["report_date"]:
+                        dest = os.path.join(report_dir, f"posoco_{target_date.strftime('%d%m%Y')}.pdf")
+                        os.replace(tmp, dest)
+                        meta = {"selected_report_date": r["report_date"], "selected_posting_date": r["posting_date"], "title": r["title"], "filepath": fp, "mime": r["mime"]}
+                        print(f"✅ Exact match downloaded and saved as {dest}")
+                        return dest, meta
+                    else:
+                        print(f"   ⚠️ Exact candidate printed date {printed} != expected {r['report_date']} — rejecting candidate.")
+                        try:
+                            os.remove(tmp)
+                        except Exception:
+                            pass
+                        continue
+                else:
+                    # accept exact-match even if printed date couldn't be extracted
+                    dest = os.path.join(report_dir, f"posoco_{target_date.strftime('%d%m%Y')}.pdf")
+                    os.replace(tmp, dest)
+                    meta = {"selected_report_date": r["report_date"], "selected_posting_date": r["posting_date"], "title": r["title"], "filepath": fp, "mime": r["mime"]}
+                    print(f"⚠️ Exact match PDF lacked printed date but Title matches — saved as {dest}")
+                    return dest, meta
 
-        # 3) If still no candidates, fallback to most recent ordering (but we'll inspect them too)
-        if not candidates:
-            def file_date_key(item):
-                parsed = infer_date_safe(item)
-                if parsed:
-                    return parsed
-                return datetime(1970, 1, 1)
-            pdf_files_sorted = sorted(pdf_files, key=file_date_key, reverse=True)
-            for i, f in enumerate(pdf_files_sorted[:8]):
-                try:
-                    inf_date = file_date_key(f)
-                except Exception:
-                    inf_date = None
-                print(f"candidate [{i}]: FileName={f.get('FileName')} FilePath={f.get('FilePath')} inferred_date={inf_date}")
-            candidates = pdf_files_sorted[:8]  # inspect top candidates
-
-        # Inspect candidate PDFs by reading their printed date on the first page.
-        selected = None
-        temp_files_to_cleanup = []
-        for item in candidates:
-            file_path_rel = item.get("FilePath") or item.get("Path") or item.get("Filepath")
-            if not file_path_rel:
-                continue
-            download_url = base_url.rstrip("/") + "/" + file_path_rel.lstrip("/")
+        # 2) No exact valid PDF for target_date — select PDFs posted ON OR BEFORE target_date
+        posted_before = [r for r in pdf_records if r["posting_date"] and r["posting_date"] <= target_date]
+        if posted_before:
+            chosen = sorted(posted_before, key=lambda x: (x["posting_date"], x["report_date"] or datetime(1970,1,1).date()), reverse=True)[0]
+            fp = chosen["filepath"]
+            download_url = base_url.rstrip("/") + "/" + fp.lstrip("/")
             if "?" not in download_url:
                 download_url = download_url + f"?cachebust={int(datetime.now().timestamp())}"
-            # download to temp and inspect
-            tmp_pdf = _download_to_temp(download_url)
-            if not tmp_pdf:
-                continue
-            temp_files_to_cleanup.append(tmp_pdf)
-            printed_date = _extract_report_date_from_pdf(tmp_pdf)
-            print(f"Inspected temp file {tmp_pdf} -> printed_date = {printed_date}")
-            # When a desired_date is provided, we prefer it: if printed_date matches desired_date, accept.
-            if printed_date and desired_date and printed_date == desired_date:
-                print("✅ Selected PDF by printed report date match to desired_date:", download_url)
-                server_parsed = desired_date
-                # prefer requested desired_date for filename if provided, else keep server_parsed
-                if desired_date:
-                    pdf_name = f"posoco_{desired_date.strftime('%d%m%Y')}.pdf"
-                else:
-                    pdf_name = f"posoco_{server_parsed.strftime('%d%m%Y')}.pdf"
-                final_path = os.path.join(report_dir, pdf_name)
-                os.replace(tmp_pdf, final_path)
-                for t in temp_files_to_cleanup:
-                    if os.path.exists(t) and t != final_path:
-                        try:
-                            os.remove(t)
-                        except Exception:
-                            pass
-                return final_path
-            # If no desired_date given, keep original behaviour (accept printed_date == today)
-            if printed_date and (printed_date == local_today or printed_date == utc_today) and not desired_date:
-                print("✅ Selected PDF by printed report date match (today):", download_url)
-                server_parsed = printed_date
-                if desired_date:
-                    pdf_name = f"posoco_{desired_date.strftime('%d%m%Y')}.pdf"
-                else:
-                    pdf_name = f"posoco_{server_parsed.strftime('%d%m%Y')}.pdf"
-                final_path = os.path.join(report_dir, pdf_name)
-                os.replace(tmp_pdf, final_path)
-                for t in temp_files_to_cleanup:
-                    if os.path.exists(t) and t != final_path:
-                        try:
-                            os.remove(t)
-                        except Exception:
-                            pass
-                return final_path
+            tmp = _download_to_temp(download_url)
+            if not tmp:
+                print("❌ Failed to download chosen posted candidate.")
+                return None, None
+            # IMPORTANT: save file named by target_date as user asked
+            dest = os.path.join(report_dir, f"posoco_{target_date.strftime('%d%m%Y')}.pdf")
+            os.replace(tmp, dest)
+            meta = {"selected_report_date": chosen["report_date"], "selected_posting_date": chosen["posting_date"], "title": chosen["title"], "filepath": fp, "mime": chosen["mime"]}
+            print(f"✅ Selected most-recent posted-by-{target_date} report (actual report_date={chosen['report_date']}, posting_date={chosen['posting_date']}) and saved as {dest}")
+            return dest, meta
 
-        # If we reach here no candidate matched printed date exactly.
-        # Clean up temp files (we'll re-download the final chosen one normally)
-        for t in temp_files_to_cleanup:
-            if os.path.exists(t):
-                try:
-                    os.remove(t)
-                except Exception:
-                    pass
+        # 3) Nothing posted by target_date — look back by report_date up to lookback_days
+        for delta in range(1, lookback_days + 1):
+            prev = target_date - timedelta(days=delta)
+            candidates_prev = [r for r in pdf_records if r["report_date"] == prev]
+            if candidates_prev:
+                chosen = sorted(candidates_prev, key=lambda x: (x["posting_date"] or datetime(1970,1,1).date()), reverse=True)[0]
+                fp = chosen["filepath"]
+                download_url = base_url.rstrip("/") + "/" + fp.lstrip("/")
+                if "?" not in download_url:
+                    download_url = download_url + f"?cachebust={int(datetime.now().timestamp())}"
+                tmp = _download_to_temp(download_url)
+                if not tmp:
+                    continue
+                # Save using requested target_date filename (user requested)
+                dest = os.path.join(report_dir, f"posoco_{target_date.strftime('%d%m%Y')}.pdf")
+                os.replace(tmp, dest)
+                meta = {"selected_report_date": chosen["report_date"], "selected_posting_date": chosen["posting_date"], "title": chosen["title"], "filepath": fp, "mime": chosen["mime"]}
+                print(f"ℹ️ No report posted by {target_date}; fetched previous report {chosen['report_date']} and saved AS {dest}")
+                return dest, meta
 
-        # Fallback: choose the most-recent item (same as before)
-        def file_date_key(item):
-            parsed = infer_date_safe(item)
-            if parsed:
-                return parsed
-            return datetime(1970, 1, 1)
-        pdf_files_sorted = sorted(pdf_files, key=file_date_key, reverse=True)
-        latest_item = pdf_files_sorted[0]
-        file_path_rel = latest_item.get("FilePath") or latest_item.get("Path") or latest_item.get("Filepath")
-        if not file_path_rel:
-            print("⚠️ Missing FilePath for chosen PDF")
-            return None
+        # 4) nothing found
+        print(f"❌ No suitable PDF available for {target_date} (and no previous reports within {lookback_days} days).")
+        return None, None
 
-        server_date = file_date_key(latest_item)
-        # prefer requested desired_date for filename if provided
-        if desired_date:
-            pdf_name = f"posoco_{desired_date.strftime('%d%m%Y')}.pdf"
-        else:
-            if server_date and getattr(server_date, "year", 0) > 1970:
-                pdf_name = f"posoco_{server_date.strftime('%d%m%Y')}.pdf"
-            else:
-                pdf_name = f"posoco_{local_today.strftime('%d%m%Y')}.pdf"
-
-        local_path = os.path.join(report_dir, pdf_name)
-        download_url = base_url.rstrip("/") + "/" + file_path_rel.lstrip("/")
-        if "?" not in download_url:
-            download_url = download_url + f"?cachebust={int(datetime.now().timestamp())}"
-
-        print(f"⬇️ Downloading final selected PDF: {download_url}")
-        file_response = requests.get(download_url, stream=True, timeout=60)
-        file_response.raise_for_status()
-        with open(local_path, "wb") as fh:
-            for chunk in file_response.iter_content(1024):
-                fh.write(chunk)
-        print(f"✅ Saved latest PDF: {local_path}")
-        return local_path
-
-    except requests.exceptions.RequestException as e:
-        print(f"❌ An error occurred during download: {e}")
-        return None
     except Exception as e:
-        print(f"❌ Unexpected error in fetch_latest_pdf: {e}")
-        return None
+        print(f"❌ Error in fetch_report_for_target_date_with_fill: {e}")
+        return None, None
+
+
+# --- Keep older functions (fetch_pdf_by_filepath, fetch_latest_pdf) in case you want them — not used by default anymore ---
+# (omitted here to keep file concise; original versions can be restored if needed)
 
 # --- THIS FUNCTION HAS BEEN UPDATED: accepts desired_date but DOES NOT CHANGE TABLE SELECTION LOGIC ---
 def extract_tables_from_pdf(pdf_file, report_dir, timestamp, desired_date=None):
@@ -389,7 +330,7 @@ def extract_tables_from_pdf(pdf_file, report_dir, timestamp, desired_date=None):
             return "peak_shortage"
         if key.startswith("Energy Met"):
             return "energy"
-        if key.startswith("Hydro Gen"): # Must be checked before "Hydro"
+        if key.startswith("Hydro Gen"):
             return "hydro"
         if key.startswith("Wind Gen"):
             return "wind"
@@ -498,9 +439,11 @@ def extract_tables_from_pdf(pdf_file, report_dir, timestamp, desired_date=None):
 
     return final_json
 
-def save_to_db(final_json):
+
+def save_to_db(final_json, report_date=None):
     """Saves the processed JSON data to the Django database."""
-    today = datetime.now().date()
+    # If report_date is provided, use that; otherwise use today
+    today = report_date or datetime.now().date()
 
     try:
         # Save data from Table A
@@ -580,14 +523,20 @@ class Command(BaseCommand):
 
         # Make report_dir including target_date so folder names reflect requested date
         report_dir, timestamp = make_report_dir(SAVE_DIR, desired_date=target_date)
-        # pass desired_date to fetch_latest_pdf (only for filename purposes)
-        pdf_path = fetch_latest_pdf(API_URL, BASE_URL, payload, report_dir, timestamp, desired_date=target_date)
+
+        # Use the new fetch logic that fills with most-recent available by the requested day
+        pdf_path, meta = fetch_report_for_target_date_with_fill(API_URL, BASE_URL, payload, report_dir, target_date, lookback_days=7)
 
         if pdf_path:
             # pass desired_date to extract_tables_from_pdf so JSON filename uses target_date
             final_json = extract_tables_from_pdf(pdf_path, report_dir, timestamp, desired_date=target_date)
             if final_json and (final_json["POSOCO"]["posoco_table_a"] or final_json["POSOCO"]["posoco_table_g"]):
-                save_to_db(final_json)
+                # Save to DB using the actual selected_report_date (meta) so database rows reflect the real report date
+                selected_report_date = meta.get('selected_report_date') if meta else target_date
+                save_to_db(final_json, report_date=selected_report_date)
+                # Also print/save posting_date for auditing
+                if meta and meta.get('selected_posting_date'):
+                    print(f"ℹ️ Report posting date (when file was uploaded): {meta.get('selected_posting_date')}")
             else:
                 self.stdout.write(self.style.WARNING("Could not extract any data from the PDF to save."))
         else:

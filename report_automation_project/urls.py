@@ -17,12 +17,11 @@ Including another URLconf
 
 
 
-
+# in your project-level urls.py
 from django.contrib import admin
 from django.urls import path, include
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    # Add this line to include your dashboard's URLs
-    path('', include('report_dashboard.urls')),
+    path('', include('report_dashboard.urls')),  # keep existing
 ]
