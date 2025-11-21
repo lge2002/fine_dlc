@@ -149,12 +149,13 @@ def _extract_report_date_from_pdf(pdf_path):
 
 
 # ---------- New: fetch_report_for_target_date_with_fill ----------
-def fetch_report_for_target_date_with_fill(api_url, base_url, payload, report_dir, target_date, lookback_days=7, allow_fill=True):
+def fetch_report_for_target_date_with_fill(api_url, base_url, payload, report_dir, target_date, lookback_days=7):
     """
     Policy:
-      - If allow_fill is True (default): previous behavior (exact preferred, else posted-by<=target_date, else lookback).
-      - If allow_fill is False: ONLY accept exact report_date == target_date AND the PDF must contain a printed date
-                             that equals the report_date. Do NOT accept if printed date is missing or mismatched.
+      - If a PDF for report_date == target_date exists and is valid, download and save as posoco_<target_date>.pdf
+      - Else choose the PDF with posting_date <= target_date with the latest posting_date (i.e. most recent available by that day). 
+        Download that PDF (even if its report_date < target_date) and SAVE the file named as posoco_<target_date>.pdf.
+      - Else look back by report_date up to lookback_days and pick the latest previous report; save it named as posoco_<target_date>.pdf.
     Returns: (local_pdf_path_or_None, metadata_or_None)
     metadata = { 'selected_report_date': date, 'selected_posting_date': date, 'title': str, 'filepath': str, 'mime': str }
     """
@@ -232,53 +233,28 @@ def fetch_report_for_target_date_with_fill(api_url, base_url, payload, report_di
                 tmp = _download_to_temp(download_url)
                 if not tmp:
                     continue
-
                 printed = _extract_report_date_from_pdf(tmp)
-
-                if not allow_fill:
-                    # STRICT MODE for today's run: require printed date to be present AND equal to report_date
-                    if printed and printed == r["report_date"]:
+                if printed:
+                    if printed == r["report_date"]:
                         dest = os.path.join(report_dir, f"posoco_{target_date.strftime('%d%m%Y')}.pdf")
                         os.replace(tmp, dest)
                         meta = {"selected_report_date": r["report_date"], "selected_posting_date": r["posting_date"], "title": r["title"], "filepath": fp, "mime": r["mime"]}
-                        print(f"✅ Exact and strict match downloaded and saved as {dest}")
+                        print(f"✅ Exact match downloaded and saved as {dest}")
                         return dest, meta
                     else:
-                        # reject candidate (either printed missing or mismatched)
+                        print(f"   ⚠️ Exact candidate printed date {printed} != expected {r['report_date']} — rejecting candidate.")
                         try:
                             os.remove(tmp)
                         except Exception:
                             pass
-                        print(f"   ⚠️ Strict mode: candidate rejected (printed date={printed}, expected={r['report_date']}).")
                         continue
                 else:
-                    # RELAXED MODE: accept if printed matches; if printed missing, accept by title
-                    if printed:
-                        if printed == r["report_date"]:
-                            dest = os.path.join(report_dir, f"posoco_{target_date.strftime('%d%m%Y')}.pdf")
-                            os.replace(tmp, dest)
-                            meta = {"selected_report_date": r["report_date"], "selected_posting_date": r["posting_date"], "title": r["title"], "filepath": fp, "mime": r["mime"]}
-                            print(f"✅ Exact match downloaded and saved as {dest}")
-                            return dest, meta
-                        else:
-                            print(f"   ⚠️ Exact candidate printed date {printed} != expected {r['report_date']} — rejecting candidate.")
-                            try:
-                                os.remove(tmp)
-                            except Exception:
-                                pass
-                            continue
-                    else:
-                        # printed missing: accept (relaxed behavior)
-                        dest = os.path.join(report_dir, f"posoco_{target_date.strftime('%d%m%Y')}.pdf")
-                        os.replace(tmp, dest)
-                        meta = {"selected_report_date": r["report_date"], "selected_posting_date": r["posting_date"], "title": r["title"], "filepath": fp, "mime": r["mime"]}
-                        print(f"⚠️ Exact match PDF lacked printed date but Title matches — saved as {dest}")
-                        return dest, meta
-
-        # If strict mode (allow_fill=False) and no accepted exact found -> abort (no fallback)
-        if not allow_fill:
-            print(f"ℹ️ Strict mode: no exact PDF with matching printed date for {target_date}. Not falling back.")
-            return None, None
+                    # accept exact-match even if printed date couldn't be extracted
+                    dest = os.path.join(report_dir, f"posoco_{target_date.strftime('%d%m%Y')}.pdf")
+                    os.replace(tmp, dest)
+                    meta = {"selected_report_date": r["report_date"], "selected_posting_date": r["posting_date"], "title": r["title"], "filepath": fp, "mime": r["mime"]}
+                    print(f"⚠️ Exact match PDF lacked printed date but Title matches — saved as {dest}")
+                    return dest, meta
 
         # 2) No exact valid PDF for target_date — select PDFs posted ON OR BEFORE target_date
         posted_before = [r for r in pdf_records if r["posting_date"] and r["posting_date"] <= target_date]
@@ -548,19 +524,9 @@ class Command(BaseCommand):
         # Make report_dir including target_date so folder names reflect requested date
         report_dir, timestamp = make_report_dir(SAVE_DIR, desired_date=target_date)
 
-        # Decide strictness: if running for today => strict (no fallback), otherwise allow fill/lookback
-        is_today = (target_date == datetime.now().date())
-        allow_fill = not is_today
+        # Use the new fetch logic that fills with most-recent available by the requested day
+        pdf_path, meta = fetch_report_for_target_date_with_fill(API_URL, BASE_URL, payload, report_dir, target_date, lookback_days=7)
 
-        if is_today:
-            self.stdout.write("ℹ️ Running in STRICT mode for today: will only accept a PDF whose printed report date is TODAY.")
-        else:
-            self.stdout.write("ℹ️ Running in fallback mode for past-date run: will attempt filling/lookback if exact not available.")
-
-        # Use the new fetch logic that fills with most-recent available by the requested day (unless strict)
-        pdf_path, meta = fetch_report_for_target_date_with_fill(API_URL, BASE_URL, payload, report_dir, target_date, lookback_days=7, allow_fill=allow_fill)
-
-        # === Graceful handling: if today's run and no PDF, warn and exit without error ===
         if pdf_path:
             # pass desired_date to extract_tables_from_pdf so JSON filename uses target_date
             final_json = extract_tables_from_pdf(pdf_path, report_dir, timestamp, desired_date=target_date)
@@ -574,14 +540,6 @@ class Command(BaseCommand):
             else:
                 self.stdout.write(self.style.WARNING("Could not extract any data from the PDF to save."))
         else:
-            # If running for today, treat missing PDF as "not yet available" (warning) instead of an error
-            if is_today:
-                self.stdout.write(self.style.WARNING("⚠️ Today's PDF was not found (may not be uploaded yet). Exiting without error — try again later."))
-                # Return early to avoid printing final success as error
-                return
-            else:
-                # Past-date runs should still be considered hard failures if nothing was fetched
-                self.stdout.write(self.style.ERROR("Failed to download PDF for requested past date. Aborting process."))
-                return
+            self.stdout.write(self.style.ERROR("Failed to download PDF. Aborting process."))
 
         self.stdout.write(self.style.SUCCESS("✅ Process finished."))

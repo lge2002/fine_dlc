@@ -11,7 +11,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 from pathlib import Path
-
+import os
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -94,12 +94,12 @@ WSGI_APPLICATION = 'report_automation_project.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.mysql',
-        'NAME': 'ndl_report',
-        'USER': 'root',
-        'PASSWORD': 'qwerty@123',
-        'HOST': 'localhost',
-        'PORT': '3309',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.getenv('POSTGRES_DB', 'dlc_report'),
+        'USER': os.getenv('POSTGRES_USER', 'postgres'),
+        'PASSWORD': os.getenv('POSTGRES_PASSWORD', 'Frcst$2025'),
+        'HOST': os.getenv('POSTGRES_HOST', '172.16.7.119'),
+        'PORT': int(os.getenv('POSTGRES_PORT', '8010')),
     }
 }
 
